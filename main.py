@@ -1,14 +1,14 @@
 import os
-import time
 import json
-import threading
+import asyncio
 import feedparser
 import yfinance as yf
 from telegram import Bot
-from datetime import datetime, timedelta  # ✅ updated
+from datetime import datetime, timedelta
+from transformers import pipeline
 
 # =========================
-# 🔐 CONFIG
+# 🔐 CONFIG & NLP MODELS
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -17,6 +17,12 @@ if not BOT_TOKEN or not CHAT_ID:
     raise ValueError("Missing BOT_TOKEN or CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
+
+print("Loading NLP Models for Normal News...")
+# FinBERT for financial sentiment
+finbert = pipeline("text-classification", model="ProsusAI/finbert")
+# Zero-shot classifier for dynamic relevance scoring
+zero_shot = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
 
 # =========================
 # 📁 FILES
@@ -37,121 +43,41 @@ def save_data(file, data):
     with open(file, "w") as f:
         json.dump(data, f, indent=2)
 
-sent_news = load_data(NEWS_LOG_FILE, [])
+sent_news = load_data(NEWS_LOG_FILE,)
 macro_flag = load_data(MACRO_FILE, {})
 
 # =========================
 # 📩 TELEGRAM
 # =========================
-def send(text):
+async def send(text):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=text)
+        await bot.send_message(chat_id=CHAT_ID, text=text)
         print("✅", text)
     except Exception as e:
         print("❌", e)
-
-# =========================
-# 📰 FETCH NEWS
-# =========================
-def fetch_news():
-    try:
-        url = "https://feeds.reuters.com/reuters/businessNews"
-        feed = feedparser.parse(url)
-        return [entry.title for entry in feed.entries[:10]]
-    except:
-        return []
-
-# =========================
-# 🧠 SENTIMENT
-# =========================
-def get_sentiment(text):
-    t = text.lower()
-
-    bullish = ["rise", "growth", "strong", "gain", "surge"]
-    bearish = ["fall", "drop", "decline", "weak", "crash"]
-
-    if any(w in t for w in bullish):
-        return "BULLISH"
-    elif any(w in t for w in bearish):
-        return "BEARISH"
-    return "NEUTRAL"
-
-# =========================
-# 🎯 IMPACT
-# =========================
-def get_impact(text):
-    t = text.lower()
-
-    high = ["cpi", "inflation", "fed", "rate", "war"]
-    medium = ["oil", "bank", "earnings", "pmi"]
-
-    if any(w in t for w in high):
-        return "HIGH"
-    elif any(w in t for w in medium):
-        return "MEDIUM"
-    return "LOW"
-
-# =========================
-# 🧠 FORMAT NEWS
-# =========================
-def format_news(headline):
-    sentiment = get_sentiment(headline)
-    impact = get_impact(headline)
-
-    if impact == "LOW":
-        return None
-
-    emoji = "📈" if sentiment == "BULLISH" else "📉" if sentiment == "BEARISH" else "📰"
-
-    if impact == "HIGH":
-        msg = f"""🚨 {headline}
-
-🧠 Sentiment: {sentiment}
-🎯 Impact: {impact}
-🏆 Source: Reuters"""
-    else:
-        msg = f"""{emoji} {headline}
-→ {sentiment.title()} tone"""
-
-    return msg, sentiment, impact
-
-# =========================
-# 💾 STORE NEWS
-# =========================
-def store_news(headline, sentiment, impact):
-    data = load_data(NEWS_DATA_FILE, [])
-
-    data.append({
-        "headline": headline,
-        "sentiment": sentiment,
-        "impact": impact,
-        "time": str(datetime.now())
-    })
-
-    save_data(NEWS_DATA_FILE, data)
 
 # =========================
 # 📈 PRICE SAFE
 # =========================
 def get_price(symbol):
     try:
-        data = yf.download(symbol, period="1d", interval="1m")
-        return data["Close"].iloc[-1]
+        data = yf.download(symbol, period="1d", interval="1m", progress=False)
+        return data["Close"].iloc[-1].iloc
     except:
         return None
 
 # =========================
-# 📈 REACTION ENGINE
+# 📈 REACTION ENGINE (ASYNC)
 # =========================
-def track_reaction(event):
+async def track_reaction(event):
     entry = get_price("EURUSD=X")
     if entry is None:
         return
 
-    time.sleep(60)
+    await asyncio.sleep(60)
     p1 = get_price("EURUSD=X")
 
-    time.sleep(240)
+    await asyncio.sleep(240)
     p5 = get_price("EURUSD=X")
 
     if p1 is None or p5 is None:
@@ -164,20 +90,17 @@ def track_reaction(event):
         "time": str(datetime.now())
     }
 
-    data = load_data(REACTION_FILE, [])
+    data = load_data(REACTION_FILE,)
     data.append(reaction)
     save_data(REACTION_FILE, data)
 
 # =========================
-# 🧠 MACRO EVENTS
+# 🧠 MACRO EVENTS (KEPT AS IS)
 # =========================
-EVENTS = [
-    {"name": "CPI", "time": "18:00", "currency": "USD", "expected": 3.2, "actual": 3.6, "previous": 3.1}
-]
+EVENTS =
 
 def get_bias(expected, actual):
     d = actual - expected
-
     if d > 0.3:
         return "STRONG BULLISH"
     elif d > 0:
@@ -199,20 +122,19 @@ def get_ist_time():
 # =========================
 # 🧠 MACRO ENGINE
 # =========================
-def macro_engine():
+async def macro_engine():
     global macro_flag
-    now = get_ist_time()  # ✅ FIX APPLIED
+    now = get_ist_time()
 
     for e in EVENTS:
         up = f"{e['name']}_up"
         rel = f"{e['name']}_rel"
 
         if now == "17:55" and not macro_flag.get(up):
-
             exp = "Higher" if e["expected"] > e["previous"] else "Cooling"
             bias = "USD → Bullish Bias" if exp == "Higher" else "USD → Bearish Bias"
 
-            send(f"""⏳ UPCOMING — {e['name']} ({e['currency']})
+            await send(f"""⏳ UPCOMING — {e['name']} ({e['currency']})
 
 🕒 Time: {e['time']} IST  
 ⚠️ High Impact Expected  
@@ -224,11 +146,10 @@ def macro_engine():
             save_data(MACRO_FILE, macro_flag)
 
         if now == e["time"] and not macro_flag.get(rel):
-
             deviation = round(e["actual"] - e["expected"], 2)
             bias = get_bias(e["expected"], e["actual"])
 
-            send(f"""🚨 {e['name']} RELEASED ({e['currency']})
+            await send(f"""🚨 {e['name']} RELEASED ({e['currency']})
 
 📊 Expected: {e['expected']}  
 📊 Actual: {e['actual']}  
@@ -238,32 +159,68 @@ def macro_engine():
 
 🎯 {e['currency']} → {bias}""")
 
-            threading.Thread(target=track_reaction, args=(e["name"],)).start()
+            asyncio.create_task(track_reaction(e["name"]))
 
             macro_flag[rel] = True
             save_data(MACRO_FILE, macro_flag)
 
 # =========================
-# 🧠 NEWS ENGINE
+# 📰 NORMAL NEWS ENGINE (UPGRADED WITH NLP)
 # =========================
-def nike_news_engine():
-    global sent_news
+def fetch_news():
+    try:
+        url = "https://feeds.reuters.com/reuters/businessNews"
+        feed = feedparser.parse(url)
+        return [entry.title for entry in feed.entries[:10]]
+    except:
+        return
 
+async def nike_news_engine():
+    global sent_news
     news_list = fetch_news()
 
     for news in news_list:
-
         if news in sent_news:
             continue
 
-        result = format_news(news)
-        if not result:
+        # 1. Zero-Shot Relevance Scoring
+        labels = ["Corporate Action", "High Impact Macroeconomic", "Low Impact Noise"]
+        impact_analysis = zero_shot(news, candidate_labels=labels)
+        impact_category = impact_analysis['labels']
+        impact_score = impact_analysis['scores']
+
+        if impact_category == "Low Impact Noise" or impact_score < 0.60:
+            sent_news.append(news)
             continue
 
-        msg, sentiment, impact = result
+        # 2. FinBERT Sentiment Tensor
+        sentiment_analysis = finbert(news)
+        sentiment = sentiment_analysis['label'].upper()
+        confidence = sentiment_analysis['score']
 
-        send(msg)
-        store_news(news, sentiment, impact)
+        if confidence > 0.70:
+            emoji = "📈" if sentiment == "BULLISH" else "📉" if sentiment == "BEARISH" else "📰"
+            msg = f"""{emoji} *NORMAL NEWS DETECTED*
+
+📰 Headline: {news}
+🧠 Sentiment: {sentiment} ({confidence:.2f})
+🎯 Impact: {impact_category}
+🏆 Source: Reuters"""
+            
+            await send(msg)
+            
+            # Store data
+            data = load_data(NEWS_DATA_FILE,)
+            data.append({
+                "headline": news,
+                "sentiment": sentiment,
+                "impact": impact_category,
+                "time": str(datetime.now())
+            })
+            save_data(NEWS_DATA_FILE, data)
+            
+            # Track reaction for normal news
+            asyncio.create_task(track_reaction(news))
 
         sent_news.append(news)
         save_data(NEWS_LOG_FILE, sent_news)
@@ -271,13 +228,17 @@ def nike_news_engine():
 # =========================
 # 🚀 START
 # =========================
-if not sent_news:
-    send("🚀 NIKE LIVE\nScanning markets...")
+async def main():
+    if not sent_news:
+        await send("🚀 NIKE LIVE\nScanning markets with Macro & NLP engines...")
 
-# =========================
-# 🔁 LOOP
-# =========================
-while True:
-    nike_news_engine()
-    macro_engine()
-    time.sleep(60)
+    # =========================
+    # 🔁 LOOP
+    # =========================
+    while True:
+        await nike_news_engine()
+        await macro_engine()
+        await asyncio.sleep(60)
+
+if __name__ == "__main__":
+    asyncio.run(main())
